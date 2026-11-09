@@ -1,0 +1,73 @@
+name: build-unsigned-ipa
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      EXPO_PUBLIC_API_URL: http://192.168.31.100:8787
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: xcodebuild -version; xcode-select -p
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies (mobile workspace only)
+        run: pnpm install --frozen-lockfile --filter @openmuse/mobile...
+
+      - name: Write API URL env for bundling
+        run: printf 'EXPO_PUBLIC_API_URL=%s\n' "$EXPO_PUBLIC_API_URL" > apps/mobile/.env
+
+      - name: Expo prebuild (ios)
+        working-directory: apps/mobile
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: Pod install
+        working-directory: apps/mobile/ios
+        run: pod install
+
+      - name: Build Release (unsigned)
+        working-directory: apps/mobile
+        run: |
+          WS=$(ls -d ios/*.xcworkspace | head -1)
+          echo "workspace: $WS"
+          xcodebuild -list -workspace "$WS"
+          xcodebuild \
+            -workspace "$WS" \
+            -scheme OpenMuse \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$PWD/build/DD" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Verify embedded JS bundle and package IPA
+        working-directory: apps/mobile
+        run: |
+          APP=$(find build/DD/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          echo "app: $APP"
+          ls -la "$APP"
+          test -f "$APP/main.jsbundle" && echo "main.jsbundle PRESENT: $(stat -f%z "$APP/main.jsbundle") bytes" || { echo 'main.jsbundle MISSING'; exit 1; }
+          rm -rf Payload openmuse-unsigned.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry openmuse-unsigned.ipa Payload
+          ls -la openmuse-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openmuse-unsigned-ipa
+          path: apps/mobile/openmuse-unsigned.ipa
+          if-no-files-found: error
